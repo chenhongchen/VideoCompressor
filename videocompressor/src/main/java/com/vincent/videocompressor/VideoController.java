@@ -5,11 +5,13 @@ import android.annotation.TargetApi;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
+import android.media.MediaCrypto;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
 import android.media.MediaMetadataRetriever;
 import android.os.Build;
 import android.util.Log;
+import android.view.Surface;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -40,7 +42,7 @@ public class VideoController {
     private static volatile VideoController Instance = null;
     private boolean videoConvertFirstWrite = true;
 
-    interface CompressProgressListener {
+    public interface CompressProgressListener {
         void onProgress(float percent);
     }
 
@@ -152,11 +154,11 @@ public class VideoController {
 
     /**
      * Background conversion for queueing tasks
+     *
      * @param path source file to compress
      * @param dest destination directory to put result
      */
-
-public void scheduleVideoConvert(String path, String dest) {
+    public void scheduleVideoConvert(String path, String dest) {
         startVideoConvertFromQueue(path, dest);
     }
 
@@ -242,13 +244,14 @@ public void scheduleVideoConvert(String path, String dest) {
 
     /**
      * Perform the actual video compression. Processes the frames and does the magic
-     * @param sourcePath the source uri for the file as per
+     *
+     * @param sourcePath      the source uri for the file as per
      * @param destinationPath the destination directory where compressed video is eventually saved
      * @return
      */
     @TargetApi(16)
-    public boolean  convertVideo(final String sourcePath, String destinationPath, int quality, CompressProgressListener listener) {
-        this.path=sourcePath;
+    public boolean convertVideo(final String sourcePath, String destinationPath, int quality, CompressProgressListener listener) {
+        this.path = sourcePath;
 
         MediaMetadataRetriever retriever = new MediaMetadataRetriever();
         retriever.setDataSource(path);
@@ -282,7 +285,7 @@ public void scheduleVideoConvert(String path, String dest) {
             case COMPRESS_QUALITY_LOW:
                 resultWidth = originalWidth / 2;
                 resultHeight = originalHeight / 2;
-                bitrate = (resultWidth/2) * (resultHeight/2) * 10;
+                bitrate = (resultWidth / 2) * (resultHeight / 2) * 10;
                 break;
         }
 
@@ -710,7 +713,7 @@ public void scheduleVideoConvert(String path, String dest) {
         }
         didWriteData(true, error);
 
-        cachedFile=cacheFile;
+        cachedFile = cacheFile;
 
        /* File fdelete = inputFile;
         if (fdelete.exists()) {
@@ -722,9 +725,9 @@ public void scheduleVideoConvert(String path, String dest) {
         }*/
 
         //inputFile.delete();
-        Log.e("ViratPath",path+"");
-        Log.e("ViratPath",cacheFile.getPath()+"");
-        Log.e("ViratPath",inputFile.getPath()+"");
+        Log.e("ViratPath", path + "");
+        Log.e("ViratPath", cacheFile.getPath() + "");
+        Log.e("ViratPath", inputFile.getPath() + "");
 
 
        /* Log.e("ViratPath",path+"");
@@ -750,7 +753,7 @@ public void scheduleVideoConvert(String path, String dest) {
         }
 */
 
-    //    cacheFile.delete();
+        //    cacheFile.delete();
 
        /* try {
            // copyFile(cacheFile,inputFile);
@@ -759,21 +762,447 @@ public void scheduleVideoConvert(String path, String dest) {
         } catch (IOException e) {
             e.printStackTrace();
         }*/
-         // cacheFile.delete();
-       // inputFile.delete();
+        // cacheFile.delete();
+        // inputFile.delete();
         return true;
     }
 
-    public static void copyFile(File src, File dst) throws IOException
-    {
+    @TargetApi(16)
+    public boolean convertVideo(String sourcePath, String destinationPath, double maxSize, int bitRate, VideoController.CompressProgressListener listener) throws Exception {
+        this.path = sourcePath;
+        MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+        retriever.setDataSource(this.path);
+        String width = retriever.extractMetadata(18);
+        String height = retriever.extractMetadata(19);
+        String rotation = retriever.extractMetadata(24);
+        long duration = Long.valueOf(retriever.extractMetadata(9)) * 1000L;
+        long startTime = -1L;
+        long endTime = -1L;
+        int rotationValue = Integer.valueOf(rotation);
+        int originalWidth = Integer.valueOf(width);
+        int originalHeight = Integer.valueOf(height);
+        int resultMaxsize = (int) maxSize;
+        int resultWidth = originalWidth;
+        int resultHeight = originalHeight;
+        if (originalWidth > originalHeight) {
+            if (originalWidth > resultMaxsize) {
+                resultWidth = resultMaxsize;
+                resultHeight = (int) ((float) resultMaxsize * ((float) originalHeight / (float) originalWidth));
+            }
+        } else if (originalHeight > resultMaxsize) {
+            resultHeight = originalHeight;
+            resultWidth = (int) ((float) originalHeight * ((float) originalWidth / (float) originalHeight));
+        }
+
+        int rotateRender = 0;
+        File cacheFile = new File(destinationPath);
+        int temp;
+        if (Build.VERSION.SDK_INT < 18 && resultHeight > resultWidth && resultWidth != originalWidth && resultHeight != originalHeight) {
+            temp = resultHeight;
+            resultHeight = resultWidth;
+            resultWidth = temp;
+            rotationValue = 90;
+            rotateRender = 270;
+        } else if (Build.VERSION.SDK_INT > 20) {
+            if (rotationValue == 90) {
+                temp = resultHeight;
+                resultHeight = resultWidth;
+                resultWidth = temp;
+                rotationValue = 0;
+                rotateRender = 270;
+            } else if (rotationValue == 180) {
+                rotateRender = 180;
+                rotationValue = 0;
+            } else if (rotationValue == 270) {
+                temp = resultHeight;
+                resultHeight = resultWidth;
+                resultWidth = temp;
+                rotationValue = 0;
+                rotateRender = 90;
+            }
+        }
+
+        File inputFile = new File(this.path);
+        if (!inputFile.canRead()) {
+            this.didWriteData(true, true);
+            return false;
+        } else {
+            this.videoConvertFirstWrite = true;
+            boolean error = false;
+            long videoStartTime = startTime;
+            long time = System.currentTimeMillis();
+            if (resultWidth != 0 && resultHeight != 0) {
+                MP4Builder mediaMuxer = null;
+                MediaExtractor extractor = null;
+                MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+                Mp4Movie movie = new Mp4Movie();
+                movie.setCacheFile(cacheFile);
+                movie.setRotation(rotationValue);
+                movie.setSize(resultWidth, resultHeight);
+                mediaMuxer = (new MP4Builder()).createMovie(movie);
+                extractor = new MediaExtractor();
+                extractor.setDataSource(inputFile.toString());
+                int videoIndex = this.selectTrack(extractor, false);
+                if (videoIndex >= 0) {
+                    MediaCodec decoder = null;
+                    MediaCodec encoder = null;
+                    InputSurface inputSurface = null;
+                    OutputSurface outputSurface = null;
+                    long videoTime = -1L;
+                    boolean outputDone = false;
+                    boolean inputDone = false;
+                    boolean decoderDone = false;
+                    int swapUV = 0;
+                    int videoTrackIndex = -5;
+                    int processorType = 0;
+                    String manufacturer = Build.MANUFACTURER.toLowerCase();
+                    int colorFormat;
+                    if (Build.VERSION.SDK_INT < 18) {
+                        MediaCodecInfo codecInfo = selectCodec("video/avc");
+                        colorFormat = selectColorFormat(codecInfo, "video/avc");
+                        if (colorFormat == 0) {
+                            throw new RuntimeException("no supported color format");
+                        }
+
+                        String codecName = codecInfo.getName();
+                        if (codecName.contains("OMX.qcom.")) {
+                            processorType = 1;
+                            if (Build.VERSION.SDK_INT == 16 && (manufacturer.equals("lge") || manufacturer.equals("nokia"))) {
+                                swapUV = 1;
+                            }
+                        } else if (codecName.contains("OMX.Intel.")) {
+                            processorType = 2;
+                        } else if (codecName.equals("OMX.MTK.VIDEO.ENCODER.AVC")) {
+                            processorType = 3;
+                        } else if (codecName.equals("OMX.SEC.AVC.Encoder")) {
+                            processorType = 4;
+                            swapUV = 1;
+                        } else if (codecName.equals("OMX.TI.DUCATI1.VIDEO.H264E")) {
+                            processorType = 5;
+                        }
+
+                        Log.e("tmessages", "codec = " + codecInfo.getName() + " manufacturer = " + manufacturer + "device = " + Build.MODEL);
+                    } else {
+                        colorFormat = 2130708361;
+                    }
+
+                    Log.e("tmessages", "colorFormat = " + colorFormat);
+                    int padding = 0;
+                    int bufferSize = resultWidth * resultHeight * 3 / 2;
+                    int resultHeightAligned;
+                    if (processorType == 0) {
+                        if (resultHeight % 16 != 0) {
+                            resultHeightAligned = resultHeight + (16 - resultHeight % 16);
+                            padding = resultWidth * (resultHeightAligned - resultHeight);
+                            bufferSize += padding * 5 / 4;
+                        }
+                    } else if (processorType == 1) {
+                        if (!manufacturer.toLowerCase().equals("lge")) {
+                            int uvoffset = resultWidth * resultHeight + 2047 & -2048;
+                            padding = uvoffset - resultWidth * resultHeight;
+                            bufferSize += padding;
+                        }
+                    } else if (processorType != 5 && processorType == 3 && manufacturer.equals("baidu")) {
+                        resultHeightAligned = resultHeight + (16 - resultHeight % 16);
+                        padding = resultWidth * (resultHeightAligned - resultHeight);
+                        bufferSize += padding * 5 / 4;
+                    }
+
+                    extractor.selectTrack(videoIndex);
+                    if (startTime > 0L) {
+                        extractor.seekTo(startTime, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
+                    } else {
+                        extractor.seekTo(0L, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
+                    }
+
+                    MediaFormat inputFormat = extractor.getTrackFormat(videoIndex);
+                    MediaFormat outputFormat = MediaFormat.createVideoFormat("video/avc", resultWidth, resultHeight);
+                    outputFormat.setInteger("color-format", colorFormat);
+                    outputFormat.setInteger("bitrate", bitRate);
+                    outputFormat.setInteger("frame-rate", 25);
+                    outputFormat.setInteger("i-frame-interval", 10);
+                    if (Build.VERSION.SDK_INT < 18) {
+                        outputFormat.setInteger("stride", resultWidth + 32);
+                        outputFormat.setInteger("slice-height", resultHeight);
+                    }
+
+                    encoder = MediaCodec.createEncoderByType("video/avc");
+                    encoder.configure(outputFormat, (Surface) null, (MediaCrypto) null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+                    if (Build.VERSION.SDK_INT >= 18) {
+                        inputSurface = new InputSurface(encoder.createInputSurface());
+                        inputSurface.makeCurrent();
+                    }
+
+                    encoder.start();
+                    decoder = MediaCodec.createDecoderByType(inputFormat.getString("mime"));
+                    if (Build.VERSION.SDK_INT >= 18) {
+                        outputSurface = new OutputSurface();
+                    } else {
+                        outputSurface = new OutputSurface(resultWidth, resultHeight, rotateRender);
+                    }
+
+                    decoder.configure(inputFormat, outputSurface.getSurface(), (MediaCrypto) null, 0);
+                    decoder.start();
+//                    int TIMEOUT_USEC = true;
+                    ByteBuffer[] decoderInputBuffers = null;
+                    ByteBuffer[] encoderOutputBuffers = null;
+                    ByteBuffer[] encoderInputBuffers = null;
+                    if (Build.VERSION.SDK_INT < 21) {
+                        decoderInputBuffers = decoder.getInputBuffers();
+                        encoderOutputBuffers = encoder.getOutputBuffers();
+                        if (Build.VERSION.SDK_INT < 18) {
+                            encoderInputBuffers = encoder.getInputBuffers();
+                        }
+                    }
+
+                    while (true) {
+                        if (outputDone) {
+                            if (videoTime != -1L) {
+                                videoStartTime = videoTime;
+                            }
+
+                            extractor.unselectTrack(videoIndex);
+                            if (outputSurface != null) {
+                                outputSurface.release();
+                            }
+
+                            if (inputSurface != null) {
+                                inputSurface.release();
+                            }
+
+                            if (decoder != null) {
+                                decoder.stop();
+                                decoder.release();
+                            }
+
+                            if (encoder != null) {
+                                encoder.stop();
+                                encoder.release();
+                            }
+                            break;
+                        }
+
+                        boolean decoderOutputAvailable;
+                        int encoderStatus;
+                        ByteBuffer encodedData;
+                        if (!inputDone) {
+                            decoderOutputAvailable = false;
+                            int index = extractor.getSampleTrackIndex();
+                            if (index == videoIndex) {
+                                encoderStatus = decoder.dequeueInputBuffer(2500L);
+                                if (encoderStatus >= 0) {
+                                    if (Build.VERSION.SDK_INT < 21) {
+                                        encodedData = decoderInputBuffers[encoderStatus];
+                                    } else {
+                                        encodedData = decoder.getInputBuffer(encoderStatus);
+                                    }
+
+                                    int chunkSize = extractor.readSampleData(encodedData, 0);
+                                    if (chunkSize < 0) {
+                                        decoder.queueInputBuffer(encoderStatus, 0, 0, 0L, 4);
+                                        inputDone = true;
+                                    } else {
+                                        decoder.queueInputBuffer(encoderStatus, 0, chunkSize, extractor.getSampleTime(), 0);
+                                        extractor.advance();
+                                    }
+                                }
+                            } else if (index == -1) {
+                                decoderOutputAvailable = true;
+                            }
+
+                            if (decoderOutputAvailable) {
+                                encoderStatus = decoder.dequeueInputBuffer(2500L);
+                                if (encoderStatus >= 0) {
+                                    decoder.queueInputBuffer(encoderStatus, 0, 0, 0L, 4);
+                                    inputDone = true;
+                                }
+                            }
+                        }
+
+                        decoderOutputAvailable = !decoderDone;
+                        boolean encoderOutputAvailable = true;
+
+                        while (decoderOutputAvailable || encoderOutputAvailable) {
+                            encoderStatus = encoder.dequeueOutputBuffer(info, 2500L);
+                            if (encoderStatus == -1) {
+                                encoderOutputAvailable = false;
+                            } else if (encoderStatus == -3) {
+                                if (Build.VERSION.SDK_INT < 21) {
+                                    encoderOutputBuffers = encoder.getOutputBuffers();
+                                }
+                            } else if (encoderStatus == -2) {
+                                MediaFormat newFormat = encoder.getOutputFormat();
+                                if (videoTrackIndex == -5) {
+                                    videoTrackIndex = mediaMuxer.addTrack(newFormat, false);
+                                }
+                            } else {
+                                if (encoderStatus < 0) {
+                                    throw new RuntimeException("unexpected result from encoder.dequeueOutputBuffer: " + encoderStatus);
+                                }
+
+                                if (Build.VERSION.SDK_INT < 21) {
+                                    encodedData = encoderOutputBuffers[encoderStatus];
+                                } else {
+                                    encodedData = encoder.getOutputBuffer(encoderStatus);
+                                }
+
+                                if (encodedData == null) {
+                                    throw new RuntimeException("encoderOutputBuffer " + encoderStatus + " was null");
+                                }
+
+                                if (info.size > 1) {
+                                    if ((info.flags & 2) == 0) {
+                                        if (mediaMuxer.writeSampleData(videoTrackIndex, encodedData, info, false)) {
+                                            this.didWriteData(false, false);
+                                        }
+                                    } else if (videoTrackIndex == -5) {
+                                        byte[] csd = new byte[info.size];
+                                        encodedData.limit(info.offset + info.size);
+                                        encodedData.position(info.offset);
+                                        encodedData.get(csd);
+                                        ByteBuffer sps = null;
+                                        ByteBuffer pps = null;
+
+                                        for (int a = info.size - 1; a >= 0 && a > 3; --a) {
+                                            if (csd[a] == 1 && csd[a - 1] == 0 && csd[a - 2] == 0 && csd[a - 3] == 0) {
+                                                sps = ByteBuffer.allocate(a - 3);
+                                                pps = ByteBuffer.allocate(info.size - (a - 3));
+                                                sps.put(csd, 0, a - 3).position(0);
+                                                pps.put(csd, a - 3, info.size - (a - 3)).position(0);
+                                                break;
+                                            }
+                                        }
+
+                                        MediaFormat newFormat = MediaFormat.createVideoFormat("video/avc", resultWidth, resultHeight);
+                                        if (sps != null && pps != null) {
+                                            newFormat.setByteBuffer("csd-0", sps);
+                                            newFormat.setByteBuffer("csd-1", pps);
+                                        }
+
+                                        videoTrackIndex = mediaMuxer.addTrack(newFormat, false);
+                                    }
+                                }
+
+                                outputDone = (info.flags & 4) != 0;
+                                encoder.releaseOutputBuffer(encoderStatus, false);
+                            }
+
+                            if (encoderStatus == -1 && !decoderDone) {
+                                int decoderStatus = decoder.dequeueOutputBuffer(info, 2500L);
+                                if (decoderStatus == -1) {
+                                    decoderOutputAvailable = false;
+                                } else if (decoderStatus != -3) {
+                                    if (decoderStatus == -2) {
+                                        MediaFormat newFormat = decoder.getOutputFormat();
+                                        Log.e("tmessages", "newFormat = " + newFormat);
+                                    } else {
+                                        if (decoderStatus < 0) {
+                                            throw new RuntimeException("unexpected result from decoder.dequeueOutputBuffer: " + decoderStatus);
+                                        }
+
+                                        boolean doRender;
+                                        if (Build.VERSION.SDK_INT >= 18) {
+                                            doRender = info.size != 0;
+                                        } else {
+                                            doRender = info.size != 0 || info.presentationTimeUs != 0L;
+                                        }
+
+                                        if (endTime > 0L && info.presentationTimeUs >= endTime) {
+                                            inputDone = true;
+                                            decoderDone = true;
+                                            doRender = false;
+                                            info.flags |= MediaCodec.BUFFER_FLAG_END_OF_STREAM;
+                                        }
+
+                                        if (startTime > 0L && videoTime == -1L) {
+                                            if (info.presentationTimeUs < startTime) {
+                                                doRender = false;
+                                                Log.e("tmessages", "drop frame startTime = " + startTime + " present time = " + info.presentationTimeUs);
+                                            } else {
+                                                videoTime = info.presentationTimeUs;
+                                            }
+                                        }
+
+                                        decoder.releaseOutputBuffer(decoderStatus, doRender);
+                                        if (doRender) {
+                                            boolean errorWait = false;
+                                            outputSurface.awaitNewImage();
+                                            if (!errorWait) {
+                                                if (Build.VERSION.SDK_INT >= 18) {
+                                                    outputSurface.drawImage(false);
+                                                    inputSurface.setPresentationTime(info.presentationTimeUs * 1000L);
+                                                    if (listener != null) {
+                                                        listener.onProgress((float) info.presentationTimeUs / (float) duration * 100.0F);
+                                                    }
+
+                                                    inputSurface.swapBuffers();
+                                                } else {
+                                                    int inputBufIndex = encoder.dequeueInputBuffer(2500L);
+                                                    if (inputBufIndex >= 0) {
+                                                        outputSurface.drawImage(true);
+                                                        ByteBuffer rgbBuf = outputSurface.getFrame();
+                                                        ByteBuffer yuvBuf = encoderInputBuffers[inputBufIndex];
+                                                        yuvBuf.clear();
+                                                        convertVideoFrame(rgbBuf, yuvBuf, colorFormat, resultWidth, resultHeight, padding, swapUV);
+                                                        encoder.queueInputBuffer(inputBufIndex, 0, bufferSize, info.presentationTimeUs, 0);
+                                                    } else {
+                                                        Log.e("tmessages", "input buffer not available");
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if ((info.flags & 4) != 0) {
+                                            decoderOutputAvailable = false;
+                                            Log.e("tmessages", "decoder stream end");
+                                            if (Build.VERSION.SDK_INT >= 18) {
+                                                encoder.signalEndOfInputStream();
+                                            } else {
+                                                int inputBufIndex = encoder.dequeueInputBuffer(2500L);
+                                                if (inputBufIndex >= 0) {
+                                                    encoder.queueInputBuffer(inputBufIndex, 0, 1, info.presentationTimeUs, 4);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!error) {
+                    this.readAndWriteTrack(extractor, mediaMuxer, info, videoStartTime, endTime, cacheFile, true);
+                }
+
+                if (extractor != null) {
+                    extractor.release();
+                }
+
+                if (mediaMuxer != null) {
+                    mediaMuxer.finishMovie(false);
+                }
+
+                Log.e("tmessages", "time = " + (System.currentTimeMillis() - time));
+                this.didWriteData(true, error);
+                cachedFile = cacheFile;
+                Log.e("ViratPath", this.path + "");
+                Log.e("ViratPath", cacheFile.getPath() + "");
+                Log.e("ViratPath", inputFile.getPath() + "");
+                return true;
+            } else {
+                this.didWriteData(true, true);
+                return false;
+            }
+        }
+    }
+
+    public static void copyFile(File src, File dst) throws IOException {
         FileChannel inChannel = new FileInputStream(src).getChannel();
         FileChannel outChannel = new FileOutputStream(dst).getChannel();
-        try
-        {
+        try {
             inChannel.transferTo(1, inChannel.size(), outChannel);
-        }
-        finally
-        {
+        } finally {
             if (inChannel != null)
                 inChannel.close();
             if (outChannel != null)
